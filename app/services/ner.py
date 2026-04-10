@@ -1,48 +1,70 @@
 import spacy
 import re
 
-nlp = spacy.load("en_core_web_sm")
+# Load the NLP model once
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    import en_core_web_sm
+    nlp = en_core_web_sm.load()
 
 def extract_entities_ner(text):
-    doc = nlp(text)
     entities = {
-        "Counterparty": None, "Notional": None, "ISIN": None,
-        "Underlying": None, "Maturity": None, "Bid": None,
-        "Offer": None, "PaymentFrequency": "Quarterly" # Default based on text
+        "Counterparty": None, 
+        "Notional": None, 
+        "ISIN": None,
+        "Underlying": None, 
+        "Maturity": None, 
+        "Bid": None,
+        "PaymentFrequency": None 
     }
 
-    # 1. Regex for rigid financial patterns
+    # 1. ISIN (Strict 12-char identifier)
     isin_match = re.search(r'[A-Z]{2}[A-Z0-9]{9}\d', text)
     if isin_match:
         entities["ISIN"] = isin_match.group()
 
-    # 2. Logic for "Counterparty" based on trigger phrases
-    if "regarding" in text:
-        # Look for the word immediately after "regarding"
-        match = re.search(r"regarding\s+([\w\s]+?)\s+to", text, re.IGNORECASE)
-        if match:
-            entities["Counterparty"] = match.group(1).strip()
+    # 2. Counterparty (Logic: regarding [NAME] to/at)
+    cp_match = re.search(r"regarding\s+([\w\s]+?)\s+(?:to|at)", text, re.IGNORECASE)
+    if cp_match:
+        entities["Counterparty"] = cp_match.group(1).strip()
 
-    # 3. Logic for Notional (looking for 'mio' or 'bn')
+    # 3. Notional (Number + mio/bn/m/b)
     notional_match = re.search(r'(\d+\s*(?:mio|bn|m|b))', text, re.IGNORECASE)
     if notional_match:
         entities["Notional"] = notional_match.group(1)
 
-    # 4. Underlying & Maturity (Parsing the ISIN line)
-    # Usually the text after the ISIN is the Underlying
+    # 4. Underlying (Logic: Grab the text content after the ISIN on the same line)
     lines = text.split('\n')
     for line in lines:
         if entities["ISIN"] and entities["ISIN"] in line:
-            # Captures everything after the ISIN
-            parts = line.split('\t')
-            if len(parts) > 1:
-                entities["Underlying"] = parts[1].strip()
+            # Remove the ISIN from the line, keep the rest (Name + Date)
+            name_part = line.replace(entities["ISIN"], "").strip()
+            # Clean up tabs/extra spaces to keep it on one line
+            entities["Underlying"] = re.sub(r'\s+', ' ', name_part).strip()
 
-    # 5. Extracting Offer/Spread
-    offer_match = re.search(r'(?:offer|@)\s*(.*?)(?=\s|$)', text, re.IGNORECASE)
-    if offer_match:
-        # This is a bit of a placeholder; financial shorthand is dense!
-        entities["Offer"] = "estr+45bps" # Specific logic needed for shorthand.
-        entities["Maturity"] = "2Y EVG"
+    # 5. Maturity & Bid Logic
+    # Specifically looking for the pattern: offer [MATURITY] [PRICE]
+    # e.g., "offer 2Y EVG estr+45bps"
+    offer_line_match = re.search(r'offer\s+(.*?)\s+(estr[+-]\d+bps)', text, re.IGNORECASE)
+    if offer_line_match:
+        # Group 1 is "2Y EVG"
+        entities["Maturity"] = offer_line_match.group(1).strip()
+        # Group 2 is "estr+45bps", mapped to Bid per your request
+        entities["Bid"] = offer_line_match.group(2).strip()
+
+    # 6. Payment Frequency (Keyword Mapping)
+    # Note: Mapping to your specific spelling "Quaterly"
+    frequency_map = {
+        "quarterly": "Quaterly", 
+        "semi-annual": "Semi-Annual",
+        "annual": "Annual"
+    }
+
+    text_lower = text.lower()
+    for keyword, formal_name in frequency_map.items():
+        if keyword in text_lower:
+            entities["PaymentFrequency"] = formal_name
+            break 
 
     return entities
