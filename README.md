@@ -12,7 +12,7 @@ An end-to-end intelligent document processing system using FastAPI, Streamlit, a
 The system uses a tri-layer strategy to triage documents based on complexity, ensuring high accuracy for both structured tables and unstructured legal text.
 
 ##How to Run
-1. Clone the repo: `git clone https://github.com/YOUR_USERNAME/AI_Doc_System.git`
+1. Clone the repo: `git clone https://github.com/haw07/AI_Doc_System.git`
 2. Setup .env: Create a `.env` file and add `OPENAI_API_KEY=your_key_here`.
 3. Install deps: `pip install -r requirements.txt`
 4. Run Backend: `uvicorn app.main:app --reload`
