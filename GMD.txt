@@ -1,0 +1,117 @@
+1. Global Methodology Document (GMD)
+Objective
+To build a robust entity extraction pipeline that handles three distinct document types:
+
+Structured Word Documents: Term sheets with clear tables.
+
+Financial Chat Logs: Dense, shorthand text requiring NER and Regex.
+
+Unstructured/Verbose PDFs: Long-form legal documents requiring LLMs and RAG.
+
+Pipeline Architecture
+The system follows a "Triaged Extraction" strategy:
+
+Rule-Based Layer: For .docx files, we use python-docx to extract table data. Since data is often split across rows, we join cell contents and use anchor-based Regex (e.g., matching Barrier (B) specifically) to avoid header noise.
+
+NER & Heuristic Layer: For chat logs, we use a hybrid of spaCy (for organization detection) and specific Regex patterns for financial identifiers like ISINs ([A-Z]{2}[A-Z0-9]{9}\d) and currency shorthand (e.g., mio, bn).
+
+LLM + RAG Layer: For verbose PDFs, we use a Retrieval Augmented Generation (RAG) approach.
+
+RAG & Prompting Methodology
+Chunking: Documents are split into 1,000-character segments with a 200-character overlap to ensure no data point (like a date) is cut in half.
+
+Vector Search: Using ChromaDB, we index these chunks. We query the database using semantic terms (e.g., "What are the commercial terms and maturity dates?") to retrieve the most relevant 5 chunks.
+
+Prompting: We use "Few-Shot" prompting and "JSON Mode" (gpt-4o-mini) to ensure the output is a machine-readable object without conversational filler.
+
+2. Integrated Python Implementation
+A. Word Document Service (Rule-Based)
+This handles the .docx file where "Party A" and "BANK ABC" might be in different table cells.
+
+Python
+from docx import Document
+import re
+
+def parse_docx(file_path):
+    doc = Document(file_path)
+    full_text = []
+    # Extract from paragraphs
+    for p in doc.paragraphs:
+        if p.text.strip(): full_text.append(p.text.strip())
+    # Extract from tables (Crucial for Term Sheets)
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = " : ".join(cell.text.strip() for cell in row.cells)
+            full_text.append(row_text)
+    return "\n".join(full_text)
+
+def extract_entities_rule_based(text):
+    patterns = {
+        "Counterparty": r"Party A\s*[:\t ]*(.*)",
+        "Notional": r"Notional Amount\s*\(N\)\s*[:\t ]*(.*)",
+        "Barrier": r"Barrier\s*\(B\)\s*[:\t ]*(.*)", # Avoids the header 'Barrier 75%'
+        "Underlying": r"Underlying\s*[:\t ]*(.*)"
+    }
+    entities = {"Calendar": "TARGET"}
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            entities[key] = match.group(1).split('\n')[0].strip()
+    return entities
+B. PDF Service (LLM + RAG)
+This implementation uses ChromaDB for RAG to handle verbose documents efficiently.
+
+Python
+import fitz  # PyMuPDF
+import chromadb
+from openai import OpenAI
+
+client = OpenAI()
+# Initialize ephemeral Vector DB
+vdb = chromadb.Client()
+
+def extract_entities_llm_rag(pdf_bytes):
+    # 1. Parse PDF
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    text = "\n".join([page.get_text() for page in doc])
+    
+    # 2. RAG: Chunk and Index
+    chunks = [text[i:i+1000] for i in range(0, len(text), 800)]
+    collection = vdb.get_or_create_collection(name="pdf_cache")
+    collection.add(documents=chunks, ids=[f"id{i}" for i in range(len(chunks))])
+    
+    # 3. Retrieve top relevant sections
+    results = collection.query(query_texts=["Commercial terms, dates, amounts"], n_results=3)
+    context = "\n".join(results['documents'][0])
+    
+    # 4. LLM Extraction
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Return JSON only. Fields: Counterparty, Notional, Maturity, Underlying."},
+            {"role": "user", "content": f"Extract from this context:\n{context}"}
+        ],
+        response_format={"type": "json_object"}
+    )
+    # Clean up for next run
+    vdb.delete_collection(name="pdf_cache")
+    return response.choices[0].message.content
+C. Chat Log Service (NER + Regex)
+This focuses on shorthand and identifiers like ISINs.
+
+Python
+import spacy
+import re
+
+def extract_entities_chat(text):
+    entities = {"ISIN": None, "Counterparty": None}
+    
+    # 1. Regex for ISIN
+    isin = re.search(r'[A-Z]{2}[A-Z0-9]{9}\d', text)
+    if isin: entities["ISIN"] = isin.group()
+    
+    # 2. Logic for Counterparty in chat
+    cp_match = re.search(r"regarding\s+([\w\s]+?)\s+to", text, re.IGNORECASE)
+    if cp_match: entities["Counterparty"] = cp_match.group(1).strip()
+    
+    return entities
